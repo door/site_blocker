@@ -341,15 +341,24 @@ on_receive(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfq
         if (pthread_rwlock_unlock(&userdata->urls_lock))
                 errexit("pthread_rwlock_unlock()");
 
-        if (!blocked)
-                goto accept;
+        void log_result(int level, const char *action) {
+                logmsg(level, "%s %s %s %s%s HTTP/%d.%d",
+                       action,
+                       ip_to_sa(ntohl(rq.iphdr->saddr)), 
+                       http_method_str(rq.method),
+                       lvzs(rq.host), lvzs(rq.path),
+                       rq.major, rq.minor);
+        }
 
-        log_info("redirect %s %s %s%s HTTP/%d.%d",
-                 ip_to_sa(ntohl(rq.iphdr->saddr)), 
-                 http_method_str(rq.method),
-                 lvzs(rq.host), lvzs(rq.path),
-                 rq.major, rq.minor);
+        if (!blocked) {
+#ifdef DEBUG
+                log_result(L_DEBUG, "passed");
+#endif
+                goto accept;
+        }
         
+        log_result(L_INFO, "blocked");
+
         redirect(userdata, &rq);
 
         verdict(NF_DROP);
@@ -398,15 +407,20 @@ add_url(struct urls *urls, const char *s)
                 path.val = NULL;
         }
 
-        uint32_t host_hash = lenval_hash(&host);
+        char buf[65536];
+        if (host.len > sizeof(buf)) {
+                log_warn("Hostname too long");
+                return -1;
+        }
+        memcpy_tolower(buf, host.val, host.len);
+        host.val = buf;
+
+        uint32_t host_hash = lenval_hash(&host); 
 
         struct lenvalobj *hostobj = tommy_hashlin_search(urls->hosts, lenvalobj_compare, &host, host_hash);
         if (!hostobj) {
                 hostobj = calloc(1, sizeof(struct lenvalobj));
-                hostobj->lv = malloc(sizeof(lenval_t));
-                hostobj->lv->len = host.len;
-                hostobj->lv->val = malloc(host.len);
-                memcpy_tolower((char*)hostobj->lv->val, host.val, host.len);
+                hostobj->lv = lenval_dup(&host);
                 tommy_hashlin_insert(urls->hosts, &hostobj->node, hostobj, host_hash);
                 if (path.val)
                         hashlin_new((void *)&hostobj->data);
@@ -492,12 +506,12 @@ print_urls(struct urls *urls)
                 struct lenvalobj *hostobj = hostobj_;
                 void dump_path(void *pathobj_) {
                         struct lenvalobj *pathobj = pathobj_;
-                        printf("%s %s\n", lvpzs(hostobj->lv), lvpzs(pathobj->lv));
+                        printf("%s%s\n", lvpzs(hostobj->lv), lvpzs(pathobj->lv));
                 }
                 if (hostobj->data)
                         tommy_hashlin_foreach(hostobj->data, dump_path);
                 else
-                        printf("%s WHOLE SITE\n", lvpzs(hostobj->lv));
+                        printf("%s\n", lvpzs(hostobj->lv));
         }
         tommy_hashlin_foreach(urls->hosts, dump_host);
 }
@@ -533,7 +547,6 @@ filter_thread(void *userdata_)
         char buf[2048];
         ssize_t len;
         while ((len = recv(fd, buf, sizeof(buf), 0)) >= 0) {
-                // printf("pkt received\n");
 		nfq_handle_packet(h, buf, len);
 	}
         
@@ -663,7 +676,7 @@ main(int argc, char **argv)
         if (userdata.urls_file == NULL)
                 goto usage;
         
-        if (redirect_location == NULL)
+        if (!test_urls && redirect_location == NULL)
                 goto usage;
         
         if (stat(userdata.urls_file, &urls_stat) == -1)
@@ -682,7 +695,7 @@ main(int argc, char **argv)
         
         if (!foreground) {
                 daemonize();
-                use_syslog(LOG_PID, LOG_DAEMON);
+                use_syslog(LOG_PID, facility);
                 FILE *pid = fopen(pidfile, "w");
                 if (pid == NULL)
                         syserr("fopen(\"%s\", \"w\")", pidfile);
