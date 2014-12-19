@@ -578,8 +578,6 @@ reload_thread(void *userdata_)
                 while (reload_counter == userdata->reload_counter)
                         msleep(1000); // 1ms
                 
-                log_debug("Reload urls=%p", userdata->urls);
-
                 struct urls *urls_new = read_urls(userdata->urls_file);
                 
                 if (pthread_rwlock_wrlock(&userdata->urls_lock))
